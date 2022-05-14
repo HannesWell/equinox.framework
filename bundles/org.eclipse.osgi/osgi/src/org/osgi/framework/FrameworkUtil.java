@@ -18,6 +18,7 @@ package org.osgi.framework;
 
 import static java.util.Objects.requireNonNull;
 
+import java.lang.StackWalker.Option;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.AbstractMap;
@@ -29,11 +30,12 @@ import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
-
+import java.util.function.Supplier;
 import javax.security.auth.x500.X500Principal;
 import org.eclipse.osgi.internal.framework.FilterImpl;
 import org.osgi.framework.connect.FrameworkUtilHelper;
@@ -1056,4 +1058,54 @@ public class FrameworkUtil {
 		}
 	}
 
+	private static interface ServiceUsage<T> extends AutoCloseable, Supplier<T> {
+		@Override
+		void close(); // do not throw checked exception
+
+		boolean isAvailable();
+	}
+
+	/**
+	 * @since 3.18
+	 */
+	public static <T> ServiceUsage<T> useService(Class<T> serviceClass, BundleContext ctx) {
+		ServiceReference<T> reference = ctx.getServiceReference(serviceClass);
+		// TODO: create reusable EMPTY usage for null reference?
+		// TODO: create overload using ServiceReference argument (which must not be
+		// null)?
+		T service = reference != null ? ctx.getService(reference) : null;
+		return new ServiceUsage<T>() {
+			@Override
+			public T get() {
+				if (!isAvailable()) {
+					throw new NoSuchElementException("Service " + serviceClass.getName() + " unavailable");
+				}
+				return service;
+			}
+
+			@Override
+			public boolean isAvailable() {
+				return service != null;
+			}
+
+			@Override
+			public void close() {
+				if (reference != null) {
+					ctx.ungetService(reference);
+				}
+			}
+		};
+	}
+
+	// TODO: For the time when Java-9+ is required
+	private static final StackWalker WALKER = StackWalker.getInstance(Set.of(Option.RETAIN_CLASS_REFERENCE), 2);
+
+	/**
+	 * @since 3.18
+	 */
+	public static <T> ServiceUsage<T> getService(Class<T> serviceClass) {
+		Class<?> callerClass = WALKER.getCallerClass();
+		BundleContext ctx = FrameworkUtil.getBundle(callerClass).getBundleContext();
+		return useService(serviceClass, ctx);
+	}
 }
